@@ -9,6 +9,21 @@ from bom_review._version import __version__
 from bom_review.matching import bom_vs_source_findings, duplicate_reference_findings
 
 
+def _pause_if_frozen_without_args() -> None:
+    """
+    exe 더블클릭 시 인자가 없으면 도움말 출력 후 창이 바로 닫히므로,
+    PyInstaller(frozen)이고 argv가 실행 파일만일 때 Enter 대기.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    if len(sys.argv) > 1:
+        return
+    try:
+        input("\n종료하려면 Enter 키를 누르세요 . . .")
+    except EOFError:
+        pass
+
+
 def cmd_self_check() -> int:
     """패키지·매칭 로직 스모크 테스트."""
     r = bom_vs_source_findings(["A"], ["A", "B"])
@@ -49,7 +64,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run() -> None:
-    sys.exit(main())
+    code = main()
+    _pause_if_frozen_without_args()
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":
