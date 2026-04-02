@@ -1,5 +1,7 @@
 """BOM·원본좌표·메탈좌표 검토 패키지."""
 
+from bom_review._version import __version__
+
 from bom_review.matching import (
     Finding,
     FindingKind,
@@ -9,6 +11,7 @@ from bom_review.matching import (
 )
 
 __all__ = [
+    "__version__",
     "Finding",
     "FindingKind",
     "MatchReport",
