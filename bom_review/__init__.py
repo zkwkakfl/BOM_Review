@@ -1,4 +1,4 @@
-"""BOM·원본좌표·메탈좌표 검토 패키지."""
+"""BOM·원본좌표 검토 패키지 — `python -m bom_review` 로 정식 GUI 실행."""
 
 from bom_review._version import __version__
 

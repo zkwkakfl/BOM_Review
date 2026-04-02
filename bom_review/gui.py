@@ -34,9 +34,9 @@ def run_gui() -> None:
 class ReviewApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"BOM 검토 — {__version__}")
-        self.geometry("920x640")
-        self.minsize(800, 520)
+        self.title(f"BOM 검토 정식  v{__version__}")
+        self.geometry("920x660")
+        self.minsize(800, 540)
 
         self._folder: Path | None = None
         self._paths: list[Path] = []
@@ -44,6 +44,21 @@ class ReviewApp(tk.Tk):
 
         self._bom_headers: list[str] = []
         self._src_headers: list[str] = []
+
+        self._build_menubar()
+
+        head = ttk.Frame(self, padding=(8, 6, 8, 0))
+        head.pack(fill=tk.X)
+        ttk.Label(
+            head,
+            text="BOM · 원본좌표 매칭 검토 (정식)",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            head,
+            text="작업 폴더 안의 CSV / Excel(xlsx·xlsm·xlsb)을 대상으로 합니다. 메탈좌표 역할은 UI만 준비되어 있습니다.",
+            wraplength=880,
+        ).pack(anchor=tk.W, pady=(2, 0))
 
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
@@ -108,12 +123,51 @@ class ReviewApp(tk.Tk):
         self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ys.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self._log(
-            "사용 순서:\n"
-            "1) 작업 폴더 선택\n"
-            "2) 파일 더블클릭 → BOM / 원본좌표 역할 지정\n"
-            "3) 열 이름 선택 후 「검토 실행」\n"
-            "(Excel은 첫 번째 시트만 사용합니다.)\n"
+        self._status = ttk.Label(
+            self,
+            text=f"정식 v{__version__}  |  Excel은 첫 시트만  |  CSV: UTF-8( BOM )·CP949 자동 시도",
+            anchor=tk.W,
+            relief=tk.SUNKEN,
+            padding=(6, 2),
+        )
+        self._status.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._log(self._welcome_text())
+
+    def _build_menubar(self) -> None:
+        menubar = tk.Menu(self)
+
+        m_file = tk.Menu(menubar, tearoff=0)
+        m_file.add_command(label="작업 폴더 선택…", command=self._pick_folder)
+        m_file.add_separator()
+        m_file.add_command(label="종료", command=self.destroy)
+        menubar.add_cascade(label="파일", menu=m_file)
+
+        m_help = tk.Menu(menubar, tearoff=0)
+        m_help.add_command(label="사용 안내", command=self._show_usage)
+        m_help.add_command(label="버전 정보", command=self._show_about)
+        menubar.add_cascade(label="도움말", menu=m_help)
+
+        self.config(menu=menubar)
+
+    def _welcome_text(self) -> str:
+        return (
+            "【정식 사용 순서】\n\n"
+            "1. 「폴더 선택」 또는 메뉴 파일 → 작업 폴더 선택\n"
+            "2. 목록에서 파일 더블클릭 → BOM / 원본좌표 역할 지정\n"
+            "3. 「헤더 다시 읽기」 후 BOM·원본의 좌표명 열 선택 (수량 열은 선택)\n"
+            "4. 「검토 실행」 — 결과는 아래에 표시됩니다.\n\n"
+            "※ 원본(PCB 좌표)이 기준입니다. BOM에만 있는 Reference는 오류, 원본에만 있는 항목은 참고(오류 아님)입니다.\n"
+        )
+
+    def _show_usage(self) -> None:
+        messagebox.showinfo("사용 안내", self._welcome_text())
+
+    def _show_about(self) -> None:
+        messagebox.showinfo(
+            "버전 정보",
+            f"BOM 검토 정식\n\n버전: {__version__}\n\n"
+            "사용 중 불편·추가 기능은 이슈나 내부 요청으로 알려 주세요.",
         )
 
     def _path_key(self, p: Path) -> str:

@@ -1,4 +1,4 @@
-"""콘솔 진입점 — GUI 추가 전까지 self-check 및 도움말."""
+"""앱 진입점 — 기본은 정식 GUI, 부가로 demo / self-check."""
 
 from __future__ import annotations
 
@@ -87,17 +87,19 @@ def cmd_demo() -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="BOM_Review",
-        description="BOM·원본좌표·메탈좌표 검토 도구 (콘솔 진입점)",
+        description="BOM·원본좌표 검토 도구 — 기본 실행은 정식 화면(GUI)입니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "실행 예:\n"
-            "  python -m bom_review gui       정식 UI — 폴더·파일 선택 후 실제 검토\n"
-            "  python -m bom_review           인자 없으면 데모 자동 실행\n"
-            "  python -m bom_review demo\n"
-            "  python -m bom_review self-check\n"
-            "  python -m pytest tests -v      단위 테스트 (프로젝트 루트)\n"
+            "  python -m bom_review            정식 GUI (인자 없음과 동일)\n"
+            "  python -m bom_review gui\n"
+            "  python main.py                    위와 동일\n"
+            "  BOM_Review.exe                    빌드 exe — 정식 GUI\n"
             "\n"
-            "  BOM_Review.exe gui              exe에서 정식 UI"
+            "개발·점검용:\n"
+            "  python -m bom_review demo         콘솔 샘플 출력\n"
+            "  python -m bom_review self-check   스모크 테스트\n"
+            "  python -m pytest tests -v"
         ),
     )
     p.add_argument(
@@ -107,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
 
-    gu = sub.add_parser("gui", help="정식 UI — 작업 폴더·파일 역할·열 선택 후 검토")
+    gu = sub.add_parser("gui", help="정식 GUI (기본과 동일)")
     gu.set_defaults(_handler=cmd_gui)
 
     dm = sub.add_parser("demo", help="샘플 BOM/원본으로 매칭 결과 출력 (동작 확인)")
@@ -125,11 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argv_rest = argv
 
-    # 인자 없음: exe는 정식 GUI, 소스 실행은 빠른 데모
+    # 정식 앱: 인자 없으면 항상 GUI
     if len(argv_rest) == 0:
-        if getattr(sys, "frozen", False):
-            return cmd_gui()
-        return cmd_demo()
+        return cmd_gui()
 
     parser = build_parser()
     args = parser.parse_args(argv_rest if argv is not None else None)

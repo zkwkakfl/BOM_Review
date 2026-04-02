@@ -1,6 +1,6 @@
 """
-PyInstaller 등으로 패키징할 때 사용하는 루트 진입점.
-개발 시: python main.py | python -m bom_review
+정식 앱 진입점 — 인자 없이 실행 시 GUI가 열립니다.
+python main.py  /  python -m bom_review  /  BOM_Review.exe
 """
 
 from bom_review.cli import run
