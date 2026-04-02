@@ -9,14 +9,16 @@ from bom_review._version import __version__
 from bom_review.matching import bom_vs_source_findings, duplicate_reference_findings
 
 
-def _pause_if_frozen_without_args() -> None:
+def _pause_if_frozen_subcommand() -> None:
     """
-    exe 더블클릭 시 인자가 없으면 도움말 출력 후 창이 바로 닫히므로,
-    PyInstaller(frozen)이고 argv가 실행 파일만일 때 Enter 대기.
+    exe에서 서브커맨드(demo 등) 실행 후 콘솔이 곧 닫히지 않도록 Enter 대기.
+    인자 없음(더블클릭) → GUI만 띄우므로 여기서는 대기하지 않음.
     """
     if not getattr(sys, "frozen", False):
         return
-    if len(sys.argv) > 1:
+    if len(sys.argv) <= 1:
+        return
+    if hasattr(sys.stdout, "isatty") and not sys.stdout.isatty():
         return
     try:
         input("\n종료하려면 Enter 키를 누르세요 . . .")
@@ -32,6 +34,14 @@ def cmd_self_check() -> int:
     dup = duplicate_reference_findings(["X", "X"])
     assert len(dup) == 1
     print("self-check: OK")
+    return 0
+
+
+def cmd_gui() -> int:
+    """폴더·파일·열 매핑 후 실제 데이터 검토 (Tkinter)."""
+    from bom_review.gui import run_gui
+
+    run_gui()
     return 0
 
 
@@ -81,12 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "실행 예:\n"
+            "  python -m bom_review gui       정식 UI — 폴더·파일 선택 후 실제 검토\n"
             "  python -m bom_review           인자 없으면 데모 자동 실행\n"
-            "  python -m bom_review demo      매칭 데모만 다시 출력\n"
+            "  python -m bom_review demo\n"
             "  python -m bom_review self-check\n"
             "  python -m pytest tests -v      단위 테스트 (프로젝트 루트)\n"
             "\n"
-            "  BOM_Review.exe demo             빌드 exe에서도 동일"
+            "  BOM_Review.exe gui              exe에서 정식 UI"
         ),
     )
     p.add_argument(
@@ -95,6 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
+
+    gu = sub.add_parser("gui", help="정식 UI — 작업 폴더·파일 역할·열 선택 후 검토")
+    gu.set_defaults(_handler=cmd_gui)
 
     dm = sub.add_parser("demo", help="샘플 BOM/원본으로 매칭 결과 출력 (동작 확인)")
     dm.set_defaults(_handler=cmd_demo)
@@ -111,8 +125,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argv_rest = argv
 
-    # 인자 없음: 도움말 대신 데모 실행 (소스·exe 공통, 동작 확인용)
+    # 인자 없음: exe는 정식 GUI, 소스 실행은 빠른 데모
     if len(argv_rest) == 0:
+        if getattr(sys, "frozen", False):
+            return cmd_gui()
         return cmd_demo()
 
     parser = build_parser()
@@ -126,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def run() -> None:
     code = main()
-    _pause_if_frozen_without_args()
+    _pause_if_frozen_subcommand()
     raise SystemExit(code)
 
 
