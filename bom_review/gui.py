@@ -10,7 +10,11 @@ from typing import Any
 from bom_review._version import __version__
 from bom_review.bom_parse import split_designators
 from bom_review.excel_com import SelectionSourceMeta, is_excel_path
-from bom_review.excel_snapshot import new_snapshot_workbook_path, write_role_range_to_snapshot
+from bom_review.excel_snapshot import (
+    ExcelParsedSelection,
+    new_snapshot_workbook_path,
+    persist_role_sheet_via_com,
+)
 from bom_review.bom_qty import bom_quantity_mismatch_findings
 from bom_review.matching import (
     bom_vs_source_findings,
@@ -62,6 +66,9 @@ class ReviewApp(tk.Tk):
         self._snapshot_workbook: Path | None = None
         self._bom_snapshot_sheet: str | None = None
         self._src_snapshot_sheet: str | None = None
+        # Excel에서 UsedRange 대비 선택 영역(1-based: ur_r,ur_c, r1,c1, r2,c2). 스냅샷 행 슬라이스용
+        self._bom_excel_bounds: tuple[int, int, int, int, int, int] | None = None
+        self._src_excel_bounds: tuple[int, int, int, int, int, int] | None = None
 
         self._build_menubar()
 
@@ -93,7 +100,7 @@ class ReviewApp(tk.Tk):
 
         left = ttk.LabelFrame(
             mid,
-            text="파일 목록 (더블클릭: 역할 → Excel이면 범위 지정 여부)",
+            text="파일 목록 (더블클릭: 역할 → Excel이면 시트 복사 여부)",
             padding=6,
         )
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -116,53 +123,83 @@ class ReviewApp(tk.Tk):
         map_row = ttk.Frame(right)
         map_row.pack(fill=tk.BOTH, expand=True)
 
-        bom_lf = ttk.LabelFrame(map_row, text="BOM 테이블 (자재명·좌표명·수량 필수)", padding=6)
-        bom_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
-        src_lf = ttk.LabelFrame(map_row, text="원본 테이블 — 열 매핑", padding=6)
-        src_lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0))
+        self.mapping_lf = ttk.LabelFrame(
+            map_row,
+            text="열 매핑 · BOM (자재명·좌표명·수량 열을 표에 맞게 직접 선택)",
+            padding=6,
+        )
+        self.mapping_lf.pack(fill=tk.BOTH, expand=True)
+
+        target_row = ttk.Frame(self.mapping_lf)
+        target_row.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 6))
+        ttk.Label(target_row, text="매핑 대상:").pack(side=tk.LEFT, padx=(0, 8))
+        self.var_mapping_target = tk.StringVar(value=ROLE_BOM)
+        self.rb_map_bom = ttk.Radiobutton(
+            target_row,
+            text="BOM",
+            variable=self.var_mapping_target,
+            value=ROLE_BOM,
+            command=self._on_mapping_target_change,
+        )
+        self.rb_map_bom.pack(side=tk.LEFT, padx=4)
+        self.rb_map_src = ttk.Radiobutton(
+            target_row,
+            text="원본",
+            variable=self.var_mapping_target,
+            value=ROLE_SOURCE,
+            command=self._on_mapping_target_change,
+        )
+        self.rb_map_src.pack(side=tk.LEFT, padx=4)
+
+        self._frm_bom_map = ttk.Frame(self.mapping_lf)
+        self._frm_src_map = ttk.Frame(self.mapping_lf)
 
         self.var_delim = tk.StringVar(value=", ")
-        self.combo_bom_material = ttk.Combobox(bom_lf, width=22, state="readonly")
-        self.combo_bom_ref = ttk.Combobox(bom_lf, width=22, state="readonly")
-        self.combo_bom_qty = ttk.Combobox(bom_lf, width=22, state="readonly")
-        self.combo_bom_mount = ttk.Combobox(bom_lf, width=22, state="readonly")
-        self.combo_src_ref = ttk.Combobox(src_lf, width=22, state="readonly")
-        self.combo_src_x = ttk.Combobox(src_lf, width=22, state="readonly")
-        self.combo_src_y = ttk.Combobox(src_lf, width=22, state="readonly")
-        self.combo_src_layer = ttk.Combobox(src_lf, width=22, state="readonly")
+        self.combo_bom_material = ttk.Combobox(self._frm_bom_map, width=24, state="readonly")
+        self.combo_bom_ref = ttk.Combobox(self._frm_bom_map, width=24, state="readonly")
+        self.combo_bom_qty = ttk.Combobox(self._frm_bom_map, width=24, state="readonly")
+        self.combo_bom_mount = ttk.Combobox(self._frm_bom_map, width=24, state="readonly")
+        self.combo_src_ref = ttk.Combobox(self._frm_src_map, width=24, state="readonly")
+        self.combo_src_x = ttk.Combobox(self._frm_src_map, width=24, state="readonly")
+        self.combo_src_y = ttk.Combobox(self._frm_src_map, width=24, state="readonly")
+        self.combo_src_layer = ttk.Combobox(self._frm_src_map, width=24, state="readonly")
 
         bom_rows: list[tuple[str, tk.Widget]] = [
             (
-                "자재명 열 (필수)\n품번·MPN·부품명 등",
+                "자재명 열 (필수)\n"
+                "BOM마다 열 구성이 다릅니다. 품번·MPN·부품명 등 자재를 나타내는 열을 직접 선택하세요.",
                 self.combo_bom_material,
             ),
             (
-                "좌표명 열 (필수)\n매칭·중복·펼침 기준 (Reference)",
+                "좌표명 열 (필수)\n"
+                "Reference·디자이네이터 등 매칭·중복·펼침에 쓸 열을 직접 선택하세요.",
                 self.combo_bom_ref,
             ),
             (
                 "좌표명 구분자 (필수)\n좌표명 셀 안에서 토큰 나눔",
-                ttk.Entry(bom_lf, textvariable=self.var_delim, width=18),
+                ttk.Entry(self._frm_bom_map, textvariable=self.var_delim, width=18),
             ),
             (
-                "수량 열 (필수)\n행별 수량 ↔ 같은 행 좌표명 펼친 개수 비교",
+                "수량 열 (필수)\n"
+                "행별 수량이 들어 있는 열을 직접 선택합니다. 같은 행 좌표명(펼친) 개수와 비교합니다.",
                 self.combo_bom_qty,
             ),
             (
-                "마운트 타입 (선택)\nSMD/THT 등",
+                "마운트 타입 (선택)\n"
+                "SMD/THT 등. BOM에 해당 열이 있으면 직접 선택(없으면 «(없음)»).",
                 self.combo_bom_mount,
             ),
         ]
         for r, (text, w) in enumerate(bom_rows):
-            ttk.Label(bom_lf, text=text, justify=tk.LEFT).grid(
+            ttk.Label(self._frm_bom_map, text=text, justify=tk.LEFT).grid(
                 row=r, column=0, sticky=tk.NW, padx=(0, 8), pady=3
             )
             w.grid(row=r, column=1, sticky=tk.EW, pady=3)
-        bom_lf.columnconfigure(1, weight=1)
+        self._frm_bom_map.columnconfigure(1, weight=1)
 
         src_rows: list[tuple[str, tk.Widget]] = [
             (
-                "좌표명 열 (원본, 필수)\nBOM 좌표명과 1:1 매칭",
+                "좌표명 열 (필수)\nBOM 좌표명과 1:1 매칭",
                 self.combo_src_ref,
             ),
             ("X좌표 열 (선택)", self.combo_src_x),
@@ -170,11 +207,14 @@ class ReviewApp(tk.Tk):
             ("Layer 열 (선택)\nTOP/BOT 등", self.combo_src_layer),
         ]
         for r, (text, w) in enumerate(src_rows):
-            ttk.Label(src_lf, text=text, justify=tk.LEFT).grid(
+            ttk.Label(self._frm_src_map, text=text, justify=tk.LEFT).grid(
                 row=r, column=0, sticky=tk.NW, padx=(0, 8), pady=3
             )
             w.grid(row=r, column=1, sticky=tk.EW, pady=3)
-        src_lf.columnconfigure(1, weight=1)
+        self._frm_src_map.columnconfigure(1, weight=1)
+
+        self._update_mapping_target_radios_state()
+        self._apply_mapping_target_ui()
 
         btn_row = ttk.Frame(right)
         btn_row.pack(fill=tk.X, pady=(8, 0))
@@ -194,7 +234,7 @@ class ReviewApp(tk.Tk):
 
         self._status = ttk.Label(
             self,
-            text=f"정식 v{__version__}  |  Excel: 역할 지정 시 COM으로 범위 선택 가능  |  CSV는 파일·열 선택",
+            text=f"정식 v{__version__}  |  Excel: 시트 UsedRange 복사  |  CSV는 파일·열 선택",
             anchor=tk.W,
             relief=tk.SUNKEN,
             padding=(6, 2),
@@ -224,12 +264,12 @@ class ReviewApp(tk.Tk):
             "【정식 사용 순서】\n\n"
             "1. 「폴더 선택」 또는 메뉴 파일 → 작업 폴더 선택\n"
             "2. BOM 파일은 역할 필수. 원본·메탈은 선택.\n"
-            "3. Excel(xlsx 등)에서 BOM/원본 역할을 고르면 Excel이 열려 범위를 잡을 수 있습니다. "
-            "「예」면 작업 폴더에 타임스탬프 이름의 검토용 통합문서가 생기고, 선택 범위가 시트로 복사되며 "
-            "Range_Set 시트에 원본 파일·시트·주소가 기록됩니다. 검토 실행 시 그 복사본을 읽습니다. "
-            "「아니오」는 첫 시트 전체 + 콤보(기존 방식).\n"
-            "4. 「헤더 다시 읽기」는 파일 기준으로 다시 읽으며, Excel 복사본·검토용 통합문서 연동도 해제됩니다.\n"
-            "5. 「검토 실행」 — 원본이 없으면 BOM 수량·중복만 검토합니다.\n\n"
+            "3. Excel(xlsx 등)에서 BOM/원본 역할을 고르면 Excel이 열립니다. "
+            "「예」면 활성 시트의 사용 영역(UsedRange) 전체가 타임스탬프 검토용 통합문서에 복사되고, "
+            "Range_Set에 원본 파일·시트·UsedRange 주소가 기록됩니다. 「아니오」는 첫 시트 전체 + 콤보.\n"
+            "4. 오른쪽 「매핑 대상」에서 BOM / 원본을 바꾸면 열 콤보만 전환됩니다(한 패널).\n"
+            "5. 「헤더 다시 읽기」는 파일 기준으로 다시 읽으며, Excel 복사본·검토용 통합문서 연동도 해제됩니다.\n"
+            "6. 「검토 실행」 — 원본이 없으면 BOM 수량·중복만 검토합니다.\n\n"
             "※ 원본이 있을 때: 원본이 기준이며, BOM에만 있는 Reference는 오류, 원본에만 있는 항목은 참고(오류 아님).\n"
             "※ BOM은 자재명·좌표명·수량 열이 필수입니다. 마운트 타입·원본 X/Y/Layer는 선택입니다.\n"
         )
@@ -304,10 +344,12 @@ class ReviewApp(tk.Tk):
             self._update_role_labels()
             if v in (ROLE_BOM, ROLE_SOURCE) and is_excel_path(p):
                 ask = messagebox.askyesno(
-                    "Excel 범위 지정",
+                    "Excel 시트·범위 복사",
                     f"{p.name}\n\n"
-                    "Excel을 열고 마우스 드래그·Shift+방향키로 범위를 선택한 뒤 적용할까요?\n\n"
-                    "「아니오」는 첫 시트 전체를 읽어 콤보박스로 열 고르기(기존 방식)입니다.",
+                    "Excel에서 시트를 연 뒤 검토할 셀 범위를 선택하고 「이 범위 적용」을 누르면\n"
+                    "해당 시트 전체가 서식을 유지한 채 검토용 통합문서에 복사되고, 원본 파일은 닫힙니다.\n"
+                    "열 콤보·검토는 선택한 범위만 사용합니다.\n\n"
+                    "「아니오」는 첫 시트만 파일로 읽어 콤보박스로 열을 고릅니다.",
                     parent=self,
                 )
                 if ask:
@@ -330,6 +372,36 @@ class ReviewApp(tk.Tk):
         s = self._path_for_role(ROLE_SOURCE)
         self.lbl_bom.config(text=f"BOM: {b.name if b else '—'}")
         self.lbl_src.config(text=f"원본좌표: {s.name if s else '—'}")
+        self._update_mapping_target_radios_state()
+
+    def _on_mapping_target_change(self) -> None:
+        self._apply_mapping_target_ui()
+
+    def _apply_mapping_target_ui(self) -> None:
+        """BOM / 원본 중 하나의 열 매핑만 같은 영역에 표시."""
+        t = self.var_mapping_target.get()
+        if t == ROLE_BOM:
+            self._frm_src_map.grid_remove()
+            self._frm_bom_map.grid(row=1, column=0, columnspan=2, sticky=(tk.N, tk.W, tk.E))
+            self.mapping_lf.configure(
+                text="열 매핑 · BOM (자재명·좌표명·수량 열을 표에 맞게 직접 선택)",
+            )
+        else:
+            self._frm_bom_map.grid_remove()
+            self._frm_src_map.grid(row=1, column=0, columnspan=2, sticky=(tk.N, tk.W, tk.E))
+            self.mapping_lf.configure(text="열 매핑 · 원본 좌표")
+        self.mapping_lf.columnconfigure(0, weight=1)
+
+    def _update_mapping_target_radios_state(self) -> None:
+        """원본 파일이 없으면 원본 라디오 비활성·BOM으로 되돌림."""
+        has_src = self._path_for_role(ROLE_SOURCE) is not None
+        if has_src:
+            self.rb_map_src.state(["!disabled"])
+        else:
+            self.rb_map_src.state(["disabled"])
+            if self.var_mapping_target.get() == ROLE_SOURCE:
+                self.var_mapping_target.set(ROLE_BOM)
+                self._apply_mapping_target_ui()
 
     def _clear_overrides_and_combos(self) -> None:
         self._bom_table_override = None
@@ -339,6 +411,8 @@ class ReviewApp(tk.Tk):
         self._snapshot_workbook = None
         self._bom_snapshot_sheet = None
         self._src_snapshot_sheet = None
+        self._bom_excel_bounds = None
+        self._src_excel_bounds = None
         self._clear_combos()
 
     def _clear_combos(self) -> None:
@@ -376,7 +450,6 @@ class ReviewApp(tk.Tk):
         self.combo_bom_mount.configure(values=opt_mount, state="readonly")
         self.combo_bom_mount.set("(없음)")
 
-    @staticmethod
     def _sync_bom_combos_to_table_headers(self, headers: list[str]) -> None:
         """
         검토 시 실제 로드된 헤더(bh)에 맞게 콤보 표시값을 맞춘다.
@@ -420,9 +493,47 @@ class ReviewApp(tk.Tk):
                 except KeyError:
                     pass
 
+    def _slice_review_bh_br(
+        self,
+        bh: list[str],
+        br: list[list[Any]],
+        bounds: tuple[int, int, int, int, int, int],
+    ) -> tuple[list[str], list[list[Any]]]:
+        """스냅샷에 저장된 UsedRange 전체(bh+br)에서 Excel 선택 좌표와 동일한 부분만 잘라 검토용으로 쓴다."""
+        ur_r, ur_c, r1, c1, r2, c2 = bounds
+        w = max(len(bh), max((len(r) for r in br), default=0))
+
+        def pad_row(row: list[Any], width: int) -> list[Any]:
+            r = list(row)
+            if len(r) < width:
+                r.extend([None] * (width - len(r)))
+            return r[:width]
+
+        matrix = [pad_row(bh, w)] + [pad_row(r, w) for r in br]
+        ir1, ic1 = r1 - ur_r, c1 - ur_c
+        ir2, ic2 = r2 - ur_r, c2 - ur_c
+        if ir1 < 0 or ic1 < 0 or ir2 >= len(matrix) or ic2 >= w:
+            return bh, br
+        rev_cells = matrix[ir1][ic1 : ic2 + 1]
+        review_headers = [
+            str(c).strip() if c is not None and str(c).strip() else f"열{i}"
+            for i, c in enumerate(rev_cells)
+        ]
+        review_data: list[list[Any]] = []
+        for ir in range(ir1 + 1, ir2 + 1):
+            row = matrix[ir]
+            chunk = list(row[ic1 : ic2 + 1])
+            if len(chunk) < len(review_headers):
+                chunk.extend([None] * (len(review_headers) - len(chunk)))
+            review_data.append(chunk[: len(review_headers)])
+        return review_headers, review_data
+
     @staticmethod
     def _count_nonempty_ref_but_empty_aux(ref_cells: list[Any], aux: list[Any]) -> int:
-        """기준 열(셀)은 비어 있지 않은데 보조 열이 비어 있는 행 개수. 같은 행 순서 전제."""
+        """
+        같은 행에서 ref_cells는 비어 있지 않은데 aux는 비어 있는 행 개수.
+        (ref_cells, aux)를 (좌표명, 자재명) 또는 (자재명, 좌표명) 등으로 바꿔 양방향 정합성에 재사용.
+        """
         n = min(len(ref_cells), len(aux))
         c = 0
         for i in range(n):
@@ -453,17 +564,54 @@ class ReviewApp(tk.Tk):
     def _start_excel_range_pick(self, path: Path, role: str) -> None:
         from bom_review.excel_range_dialog import ExcelRangeDialog
 
+        def persist_com(
+            xl: Any,
+            wb: Any,
+            src_path: Path,
+            parsed: ExcelParsedSelection,
+        ) -> tuple[SelectionSourceMeta, str]:
+            folder = self._folder.resolve() if self._folder is not None else src_path.parent.resolve()
+            if self._snapshot_workbook is None:
+                self._snapshot_workbook = new_snapshot_workbook_path(folder)
+            _fh, _fd, rev_h, _rd, _ms, ur_r, ur_c, _r1, c1, _r2, _c2 = parsed
+            bom_matrix_idx: int | None = None
+            if role == ROLE_BOM and rev_h:
+                picked = self.combo_bom_ref.get().strip()
+                coord_name = picked if (picked and picked in rev_h) else rev_h[0]
+                try:
+                    j = resolve_column_index(rev_h, coord_name)
+                    bom_matrix_idx = (c1 - ur_c) + j
+                except KeyError:
+                    bom_matrix_idx = None
+            meta, dest = persist_role_sheet_via_com(
+                xl,
+                wb,
+                self._snapshot_workbook,
+                role,
+                parsed,
+                bom_coord_matrix_col_index=bom_matrix_idx,
+            )
+            if role == ROLE_BOM:
+                self._bom_snapshot_sheet = dest
+            elif role == ROLE_SOURCE:
+                self._src_snapshot_sheet = dest
+            return meta, dest
+
         def on_ok(
-            headers: list[str],
-            data: list[list[Any]],
+            full_headers: list[str],
+            full_data: list[list[Any]],
+            review_headers: list[str],
+            _review_data: list[list[Any]],
             meta: SelectionSourceMeta,
+            ur_r: int,
+            ur_c: int,
+            r1: int,
+            c1: int,
+            r2: int,
+            c2: int,
+            dest_sheet: str,
         ) -> None:
-            try:
-                dest_sheet = self._persist_excel_snapshot(role, path, headers, data, meta)
-            except Exception as e:  # noqa: BLE001
-                messagebox.showerror("검토용 통합문서", str(e), parent=self)
-                on_cancel()
-                return
+            bounds = (ur_r, ur_c, r1, c1, r2, c2)
             try:
                 snap_path = self._snapshot_workbook
                 if snap_path is None:
@@ -477,74 +625,61 @@ class ReviewApp(tk.Tk):
                 messagebox.showerror("복사본 읽기", str(e), parent=self)
                 on_cancel()
                 return
-            self._apply_excel_table(role, path, h2, r2)
+            self._apply_excel_table(
+                role,
+                path,
+                h2,
+                r2,
+                review_headers=review_headers,
+                excel_bounds=bounds,
+            )
             self._fill_other_combos_after_excel(role)
             self._log(
-                "Excel 범위를 검토용 통합문서에 반영했습니다.\n"
+                "Excel에서 시트 전체를 복사해 검토용 통합문서에 반영했습니다(서식 유지).\n"
                 f"· 원본: {path.name} ({role})\n"
                 f"· 결과 파일: {self._snapshot_workbook}\n"
-                f"· 데이터 시트: {dest_sheet}\n"
-                f"· 원본 위치: {meta.source_sheet} / {meta.source_address}\n"
-                "첫 행을 헤더로 썼습니다. BOM·원본 열 매핑을 확인하세요.\n"
+                f"· 복사 시트: {dest_sheet}\n"
+                f"· 원본 시트명: {meta.source_sheet}\n"
+                f"· 결과 시트 UsedRange: {meta.sheet_used_range_address}\n"
+                f"· 결과 시트 검토 범위: {meta.review_range_address}\n"
+                "검토 범위의 첫 행을 헤더로 썼습니다. BOM·원본 열 매핑을 확인하세요.\n"
             )
 
         def on_cancel() -> None:
             self._refresh_headers()
 
-        ExcelRangeDialog(self, path, on_ok=on_ok, on_cancel=on_cancel)
-
-    def _persist_excel_snapshot(
-        self,
-        role: str,
-        path: Path,
-        headers: list[str],
-        data_rows: list[list[Any]],
-        meta: SelectionSourceMeta,
-    ) -> str:
-        """타임스탬프 결과 통합문서에 복사하고 Range_Set을 갱신한다. 복사 시트 이름을 반환."""
-        folder = self._folder.resolve() if self._folder is not None else path.parent.resolve()
-        if self._snapshot_workbook is None:
-            self._snapshot_workbook = new_snapshot_workbook_path(folder)
-        bom_coord: str | None = None
-        if role == ROLE_BOM and headers:
-            picked = self.combo_bom_ref.get().strip()
-            if picked and picked in headers:
-                bom_coord = picked
-            else:
-                bom_coord = headers[0]
-        dest = write_role_range_to_snapshot(
-            self._snapshot_workbook,
-            role=role,
-            headers=headers,
-            data_rows=data_rows,
-            meta=meta,
-            create_new_workbook=True,
-            bom_coord_column=bom_coord,
+        ExcelRangeDialog(
+            self,
+            path,
+            persist_com=persist_com,
+            on_ok=on_ok,
+            on_cancel=on_cancel,
         )
-        if role == ROLE_BOM:
-            self._bom_snapshot_sheet = dest
-        elif role == ROLE_SOURCE:
-            self._src_snapshot_sheet = dest
-        return dest
 
     def _apply_excel_table(
         self,
         role: str,
         path: Path,
-        headers: list[str],
-        data_rows: list[list[Any]],
+        full_headers: list[str],
+        full_data: list[list[Any]],
+        *,
+        review_headers: list[str] | None = None,
+        excel_bounds: tuple[int, int, int, int, int, int] | None = None,
     ) -> None:
         key = self._path_key(path)
+        combo_headers = review_headers if review_headers else full_headers
         if role == ROLE_BOM:
-            self._bom_table_override = (headers, data_rows)
+            self._bom_table_override = (full_headers, full_data)
             self._bom_override_key = key
-            self._bom_headers = headers
-            self._configure_bom_combos(headers)
+            self._bom_headers = combo_headers
+            self._configure_bom_combos(combo_headers)
+            self._bom_excel_bounds = excel_bounds
         elif role == ROLE_SOURCE:
-            self._src_table_override = (headers, data_rows)
+            self._src_table_override = (full_headers, full_data)
             self._src_override_key = key
-            self._src_headers = headers
-            self._configure_source_combos(headers)
+            self._src_headers = combo_headers
+            self._configure_source_combos(combo_headers)
+            self._src_excel_bounds = excel_bounds
 
     def _fill_other_combos_after_excel(self, edited_role: str) -> None:
         if edited_role == ROLE_BOM:
@@ -592,6 +727,8 @@ class ReviewApp(tk.Tk):
         self._snapshot_workbook = None
         self._bom_snapshot_sheet = None
         self._src_snapshot_sheet = None
+        self._bom_excel_bounds = None
+        self._src_excel_bounds = None
         bom = self._path_for_role(ROLE_BOM)
         src = self._path_for_role(ROLE_SOURCE)
         if bom is None:
@@ -694,6 +831,8 @@ class ReviewApp(tk.Tk):
                     bh, br = self._bom_table_override
             else:
                 bh, br = load_header_and_rows(bom_p, sheet_index=0, max_data_rows=None)
+            if self._bom_excel_bounds is not None:
+                bh, br = self._slice_review_bh_br(bh, br, self._bom_excel_bounds)
             self._sync_bom_combos_to_table_headers(bh)
             bom_col = self.combo_bom_ref.get().strip()
             bom_mat_choice = self.combo_bom_material.get().strip()
@@ -746,6 +885,8 @@ class ReviewApp(tk.Tk):
                         sh, sr = self._src_table_override
                 else:
                     sh, sr = load_header_and_rows(src_p, sheet_index=0, max_data_rows=None)
+                if self._src_excel_bounds is not None:
+                    sh, sr = self._slice_review_bh_br(sh, sr, self._src_excel_bounds)
                 self._sync_src_combos_to_table_headers(sh)
                 src_col = self.combo_src_ref.get().strip()
                 if not src_col:
@@ -819,17 +960,19 @@ class ReviewApp(tk.Tk):
             lines.append("(불일치 없음)\n")
         lines.append("\n")
 
-        lines.append("--- BOM 자재명·마운트 (행 정합성) ---\n")
-        bad_m = self._count_nonempty_ref_but_empty_aux(bom_cells, bom_mat_vals)
+        lines.append("--- BOM 자재명 ↔ 좌표명·마운트 (행 정합성) ---\n")
+        bad_ref_no_mat = self._count_nonempty_ref_but_empty_aux(bom_cells, bom_mat_vals)
+        bad_mat_no_ref = self._count_nonempty_ref_but_empty_aux(bom_mat_vals, bom_cells)
         lines.append(
-            f"  · 자재명 열 «{bom_mat_choice}»: "
-            f"좌표명은 있는데 자재명이 비어 있는 행 수 = {bad_m}\n"
+            f"  · 선택한 열: 자재명 «{bom_mat_choice}», 좌표명 «{bom_col}», 수량 «{qty_choice}»\n"
+            f"      - 좌표명은 있는데 자재명이 비어 있는 행 수 = {bad_ref_no_mat}\n"
+            f"      - 자재명은 있는데 좌표명이 비어 있는 행 수 = {bad_mat_no_ref}\n"
         )
         if bom_mount_vals is not None:
             bad_t = self._count_nonempty_ref_but_empty_aux(bom_cells, bom_mount_vals)
             lines.append(
-                f"  · 마운트 타입 열 «{bom_mount_choice}»: "
-                f"좌표명은 있는데 값이 비어 있는 행 수 = {bad_t}\n"
+                f"  · 마운트 «{bom_mount_choice}» (좌표명 열 기준): "
+                f"좌표명은 있는데 마운트가 비어 있는 행 수 = {bad_t}\n"
             )
         lines.append("\n")
 
