@@ -5,8 +5,18 @@ pywin32 필요: pip install pywin32
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True)
+class SelectionSourceMeta:
+    """범위 선택 당시 원본 통합문서·시트·주소(감사·추적용)."""
+
+    source_file: str
+    source_sheet: str
+    source_address: str
 
 EXCEL_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xlsb", ".xls"})
 
@@ -67,6 +77,31 @@ def read_selection_as_header_and_rows(xl: Any) -> tuple[list[str], list[list[Any
     if data:
         data = _pad_rows(data, len(headers))
     return headers, data
+
+
+def read_selection_source_meta(xl: Any) -> SelectionSourceMeta:
+    """
+    현재 Selection 기준으로 원본 파일명·시트명·절대 참조 주소를 읽는다.
+    COM 오류 시 placeholder로 채운다.
+    """
+    try:
+        sel = xl.Selection
+        ws = sel.Worksheet
+        sheet_name = str(ws.Name)
+        addr = str(sel.Address(RowAbsolute=True, ColumnAbsolute=True))
+        parent_wb = ws.Parent
+        try:
+            full = str(parent_wb.FullName)
+            src_name = Path(full).name
+        except Exception:  # noqa: BLE001
+            src_name = str(parent_wb.Name)
+        return SelectionSourceMeta(
+            source_file=src_name,
+            source_sheet=sheet_name,
+            source_address=addr,
+        )
+    except Exception:  # noqa: BLE001
+        return SelectionSourceMeta(source_file="?", source_sheet="?", source_address="?")
 
 
 def open_workbook_in_new_excel(path: Path) -> tuple[Any, Any]:

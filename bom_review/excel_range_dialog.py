@@ -9,9 +9,11 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from bom_review.excel_com import (
+    SelectionSourceMeta,
     close_excel_quietly,
     open_workbook_in_new_excel,
     read_selection_as_header_and_rows,
+    read_selection_source_meta,
 )
 
 
@@ -23,7 +25,7 @@ class ExcelRangeDialog(tk.Toplevel):
         parent: tk.Misc,
         path: Path,
         *,
-        on_ok: Callable[[list[str], list[list[Any]]], None],
+        on_ok: Callable[[list[str], list[list[Any]], SelectionSourceMeta], None],
         on_cancel: Callable[[], None],
     ) -> None:
         super().__init__(parent)
@@ -81,6 +83,7 @@ class ExcelRangeDialog(tk.Toplevel):
             self.destroy()
             return
         try:
+            meta = read_selection_source_meta(self._xl)
             parsed = read_selection_as_header_and_rows(self._xl)
             if not parsed:
                 messagebox.showwarning(
@@ -94,7 +97,7 @@ class ExcelRangeDialog(tk.Toplevel):
             self._xl = None
             self._wb = None
             self._closed = True
-            self._on_ok(headers, data)
+            self._on_ok(headers, data, meta)
             self.destroy()
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("오류", str(e), parent=self)
