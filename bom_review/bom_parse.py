@@ -42,7 +42,10 @@ def normalize_designators_to_comma_space(cell: Any) -> Any:
 
 
 def split_designators(cell: Any, delimiter: str = ", ") -> list[str]:
-    """빈 값은 제외한 설계자(Reference) 문자열 목록."""
+    """
+    delimiter 문자열로만 나눈다(정확 일치).
+    셀에 공백·세미콜론 등으로 여러 좌표가 있으면 tokenize_designators_loose 를 쓴다.
+    """
     if cell is None:
         return []
     s = str(cell).strip()

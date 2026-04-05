@@ -198,6 +198,88 @@ def read_full_sheet_and_review_selection(
     )
 
 
+def read_active_sheet_full_used_as_selection(
+    xl: Any,
+) -> tuple[
+    list[str],
+    list[list[Any]],
+    list[str],
+    list[list[Any]],
+    SelectionSourceMeta,
+    int,
+    int,
+    int,
+    int,
+    int,
+    int,
+] | None:
+    """
+    활성 시트(사용자가 선택한 시트) UsedRange 전체를 검토 범위와 동일하게 잡아 읽는다.
+    1단계 «시트만 복사» 시 Selection 없이 복사 대상 시트 내용을 확정할 때 쓴다.
+    """
+    try:
+        ws = xl.ActiveSheet
+        ur = ws.UsedRange
+        ur_val = ur.Value
+    except Exception:  # noqa: BLE001
+        return None
+    full_matrix = normalize_com_value(ur_val)
+    if not full_matrix:
+        return None
+    w = max(len(r) for r in full_matrix)
+    full_matrix = _pad_rows(full_matrix, w)
+    ur_r = int(ur.Row)
+    ur_c = int(ur.Column)
+
+    full_headers = _row_to_headers(full_matrix[0])
+    full_data = full_matrix[1:]
+    if full_data:
+        full_data = _pad_rows(full_data, len(full_headers))
+
+    nrows = len(full_matrix)
+    r1, c1 = ur_r, ur_c
+    r2, c2 = ur_r + nrows - 1, ur_c + w - 1
+
+    review_headers = list(full_headers)
+    review_data = [list(r) for r in full_data]
+
+    sheet_nm = str(ws.Name)
+    parent_wb = ws.Parent
+    try:
+        src_name = Path(str(parent_wb.FullName)).name
+    except Exception:  # noqa: BLE001
+        try:
+            src_name = str(parent_wb.Name)
+        except Exception:  # noqa: BLE001
+            src_name = "?"
+
+    r_end_used = ur_r + nrows - 1
+    c_end_used = ur_c + w - 1
+    used_addr = excel_a1_address_bounds(ur_r, ur_c, r_end_used, c_end_used)
+    rev_addr = used_addr
+
+    meta = SelectionSourceMeta(
+        source_file=src_name,
+        source_sheet=sheet_nm,
+        sheet_used_range_address=used_addr,
+        review_range_address=rev_addr,
+    )
+
+    return (
+        full_headers,
+        full_data,
+        review_headers,
+        review_data,
+        meta,
+        ur_r,
+        ur_c,
+        r1,
+        c1,
+        r2,
+        c2,
+    )
+
+
 def format_com_error(exc: BaseException) -> str:
     """pywin32 com_error 등 COM 예외를 사용자 안내용 문자열로 요약한다."""
     try:

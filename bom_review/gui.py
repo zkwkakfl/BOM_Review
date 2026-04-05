@@ -8,10 +8,11 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from bom_review._version import __version__
-from bom_review.bom_parse import split_designators
+from bom_review.bom_parse import tokenize_designators_loose
 from bom_review.excel_com import SelectionSourceMeta, is_excel_path
 from bom_review.excel_snapshot import (
     ExcelParsedSelection,
+    apply_review_selection_to_snapshot,
     new_snapshot_workbook_path,
     persist_role_sheet_via_com,
 )
@@ -69,6 +70,8 @@ class ReviewApp(tk.Tk):
         # Excel에서 UsedRange 대비 선택 영역(1-based: ur_r,ur_c, r1,c1, r2,c2). 스냅샷 행 슬라이스용
         self._bom_excel_bounds: tuple[int, int, int, int, int, int] | None = None
         self._src_excel_bounds: tuple[int, int, int, int, int, int] | None = None
+        # Excel 1단계 시트 복사 시 Range_Set에 넣을 원본파일·원본시트 (2단계에서 유지)
+        self._excel_copy_source_meta: dict[str, SelectionSourceMeta] = {}
 
         self._build_menubar()
 
@@ -125,7 +128,7 @@ class ReviewApp(tk.Tk):
 
         self.mapping_lf = ttk.LabelFrame(
             map_row,
-            text="열 매핑 · BOM (자재명·좌표명·수량 열을 표에 맞게 직접 선택)",
+            text="열 매핑 · BOM (좌표명·자재명·수량 — Excel 적용 시 좌표명 열만 결과 파일에서 ', ' 통일)",
             padding=6,
         )
         self.mapping_lf.pack(fill=tk.BOTH, expand=True)
@@ -166,17 +169,19 @@ class ReviewApp(tk.Tk):
 
         bom_rows: list[tuple[str, tk.Widget]] = [
             (
-                "자재명 열 (필수)\n"
-                "BOM마다 열 구성이 다릅니다. 품번·MPN·부품명 등 자재를 나타내는 열을 직접 선택하세요.",
-                self.combo_bom_material,
-            ),
-            (
                 "좌표명 열 (필수)\n"
-                "Reference·디자이네이터 등 매칭·중복·펼침에 쓸 열을 직접 선택하세요.",
+                "Reference·위치정보 등. 검토 실행·매칭·중복 검사에 쓰입니다.\n"
+                "Excel 「이 범위 적용」 시 이 열만 결과 통합문서에서 ', ' 형태로 통일됩니다.",
                 self.combo_bom_ref,
             ),
             (
-                "좌표명 구분자 (필수)\n좌표명 셀 안에서 토큰 나눔",
+                "자재명 열 (필수)\n"
+                "품번·MPN·부품명 등 자재를 나타내는 열입니다(통합문서 좌표 정규화 대상 아님).",
+                self.combo_bom_material,
+            ),
+            (
+                "참고(구분자 표시)\n"
+                "수량·매칭·중복은 셀 안의 쉼표·공백·세미콜론을 모두 좌표 구분으로 봅니다.",
                 ttk.Entry(self._frm_bom_map, textvariable=self.var_delim, width=18),
             ),
             (
@@ -264,14 +269,14 @@ class ReviewApp(tk.Tk):
             "【정식 사용 순서】\n\n"
             "1. 「폴더 선택」 또는 메뉴 파일 → 작업 폴더 선택\n"
             "2. BOM 파일은 역할 필수. 원본·메탈은 선택.\n"
-            "3. Excel(xlsx 등)에서 BOM/원본 역할을 고르면 Excel이 열립니다. "
-            "「예」면 활성 시트의 사용 영역(UsedRange) 전체가 타임스탬프 검토용 통합문서에 복사되고, "
-            "Range_Set에 원본 파일·시트·UsedRange 주소가 기록됩니다. 「아니오」는 첫 시트 전체 + 콤보.\n"
+            "3. Excel(xlsx 등)에서 BOM/원본 역할을 고르면 1단계로 원본에서 시트만 복사하고, "
+            "2단계로 결과 통합문서에서 검토 범위(헤더 포함)를 지정합니다. "
+            "Range_Set·BOM 좌표 정규화는 2단계 후 반영됩니다. 「아니오」는 첫 시트만 파일로 콤보.\n"
             "4. 오른쪽 「매핑 대상」에서 BOM / 원본을 바꾸면 열 콤보만 전환됩니다(한 패널).\n"
             "5. 「헤더 다시 읽기」는 파일 기준으로 다시 읽으며, Excel 복사본·검토용 통합문서 연동도 해제됩니다.\n"
             "6. 「검토 실행」 — 원본이 없으면 BOM 수량·중복만 검토합니다.\n\n"
             "※ 원본이 있을 때: 원본이 기준이며, BOM에만 있는 Reference는 오류, 원본에만 있는 항목은 참고(오류 아님).\n"
-            "※ BOM은 자재명·좌표명·수량 열이 필수입니다. 마운트 타입·원본 X/Y/Layer는 선택입니다.\n"
+            "※ BOM은 좌표명·자재명·수량 열이 필수입니다. 마운트 타입·원본 X/Y/Layer는 선택입니다.\n"
         )
 
     def _show_usage(self) -> None:
@@ -344,11 +349,11 @@ class ReviewApp(tk.Tk):
             self._update_role_labels()
             if v in (ROLE_BOM, ROLE_SOURCE) and is_excel_path(p):
                 ask = messagebox.askyesno(
-                    "Excel 시트·범위 복사",
+                    "Excel 시트 복사 (2단계)",
                     f"{p.name}\n\n"
-                    "Excel에서 시트를 연 뒤 검토할 셀 범위를 선택하고 「이 범위 적용」을 누르면\n"
-                    "해당 시트 전체가 서식을 유지한 채 검토용 통합문서에 복사되고, 원본 파일은 닫힙니다.\n"
-                    "열 콤보·검토는 선택한 범위만 사용합니다.\n\n"
+                    "1단계: Excel에서 복사할 시트만 선택해 결과 통합문서로 붙입니다.\n"
+                    "2단계: 열리는 통합문서에서 같은 복사 시트 안에 검토·콤보용 범위(헤더 행 포함)를 지정합니다.\n"
+                    "원본 통합문서는 1단계 후 닫힙니다.\n\n"
                     "「아니오」는 첫 시트만 파일로 읽어 콤보박스로 열을 고릅니다.",
                     parent=self,
                 )
@@ -384,7 +389,7 @@ class ReviewApp(tk.Tk):
             self._frm_src_map.grid_remove()
             self._frm_bom_map.grid(row=1, column=0, columnspan=2, sticky=(tk.N, tk.W, tk.E))
             self.mapping_lf.configure(
-                text="열 매핑 · BOM (자재명·좌표명·수량 열을 표에 맞게 직접 선택)",
+                text="열 매핑 · BOM (좌표명·자재명·수량 — Excel 적용 시 좌표명 열만 결과 파일에서 ', ' 통일)",
             )
         else:
             self._frm_bom_map.grid_remove()
@@ -413,6 +418,7 @@ class ReviewApp(tk.Tk):
         self._src_snapshot_sheet = None
         self._bom_excel_bounds = None
         self._src_excel_bounds = None
+        self._excel_copy_source_meta.clear()
         self._clear_combos()
 
     def _clear_combos(self) -> None:
@@ -422,7 +428,7 @@ class ReviewApp(tk.Tk):
         self._configure_source_combos([])
 
     def _configure_bom_combos(self, headers: list[str]) -> None:
-        """BOM 쪽 열 콤보를 채운다. 자재명·좌표명·수량은 필수(콤보에 '(없음)' 없음). 빈 목록이면 비활성."""
+        """BOM 쪽 열 콤보를 채운다. 좌표명·자재명·수량은 필수(콤보에 '(없음)' 없음). 빈 목록이면 비활성."""
         if not headers:
             for c in (self.combo_bom_material, self.combo_bom_ref, self.combo_bom_qty):
                 c.set("")
@@ -562,9 +568,12 @@ class ReviewApp(tk.Tk):
             c.set("(없음)")
 
     def _start_excel_range_pick(self, path: Path, role: str) -> None:
-        from bom_review.excel_range_dialog import ExcelRangeDialog
+        from bom_review.excel_range_dialog import (
+            ExcelReviewRangeDialog,
+            ExcelSheetCopyDialog,
+        )
 
-        def persist_com(
+        def persist_sheet_only(
             xl: Any,
             wb: Any,
             src_path: Path,
@@ -573,23 +582,14 @@ class ReviewApp(tk.Tk):
             folder = self._folder.resolve() if self._folder is not None else src_path.parent.resolve()
             if self._snapshot_workbook is None:
                 self._snapshot_workbook = new_snapshot_workbook_path(folder)
-            _fh, _fd, rev_h, _rd, _ms, ur_r, ur_c, _r1, c1, _r2, _c2 = parsed
-            bom_matrix_idx: int | None = None
-            if role == ROLE_BOM and rev_h:
-                picked = self.combo_bom_ref.get().strip()
-                coord_name = picked if (picked and picked in rev_h) else rev_h[0]
-                try:
-                    j = resolve_column_index(rev_h, coord_name)
-                    bom_matrix_idx = (c1 - ur_c) + j
-                except KeyError:
-                    bom_matrix_idx = None
             meta, dest = persist_role_sheet_via_com(
                 xl,
                 wb,
                 self._snapshot_workbook,
                 role,
                 parsed,
-                bom_coord_matrix_col_index=bom_matrix_idx,
+                bom_coord_excel_col_1based=None,
+                defer_openpyxl_finalize=True,
             )
             if role == ROLE_BOM:
                 self._bom_snapshot_sheet = dest
@@ -597,63 +597,122 @@ class ReviewApp(tk.Tk):
                 self._src_snapshot_sheet = dest
             return meta, dest
 
-        def on_ok(
-            full_headers: list[str],
-            full_data: list[list[Any]],
-            review_headers: list[str],
-            _review_data: list[list[Any]],
-            meta: SelectionSourceMeta,
-            ur_r: int,
-            ur_c: int,
-            r1: int,
-            c1: int,
-            r2: int,
-            c2: int,
-            dest_sheet: str,
-        ) -> None:
-            bounds = (ur_r, ur_c, r1, c1, r2, c2)
-            try:
-                snap_path = self._snapshot_workbook
-                if snap_path is None:
-                    raise RuntimeError("검토용 통합문서 경로가 없습니다.")
-                h2, r2 = load_header_and_rows_by_sheet_name(
+        def on_sheet_copied(meta: SelectionSourceMeta, dest: str) -> None:
+            self._excel_copy_source_meta[role] = meta
+
+            def persist_review(
+                xl: Any,
+                wb: Any,
+                snap_path: Path,
+                parsed: ExcelParsedSelection,
+            ) -> tuple[SelectionSourceMeta, str]:
+                src_meta = self._excel_copy_source_meta.get(role)
+                if src_meta is None:
+                    raise RuntimeError("내부 오류: 1단계 시트 복사 정보가 없습니다. 처음부터 다시 진행하세요.")
+                _fh, _fd, rev_h, _rd, _ms, _ur_r, _ur_c, _r1, c1, _r2, _c2 = parsed
+                bom_coord_excel_col_1based: int | None = None
+                if role == ROLE_BOM and rev_h:
+                    picked = self.combo_bom_ref.get().strip()
+                    if not picked:
+                        raise RuntimeError(
+                            "BOM입니다. 메인 화면에서 「좌표명」열 콤보를 먼저 고른 뒤\n"
+                            "다시 「검토 범위 적용」하세요.\n"
+                            "(검토 범위 헤더에 있는 열 이름과 맞아야 하며, 결과 파일 좌표열 ', ' 통일에도 필요합니다.)"
+                        )
+                    try:
+                        j = resolve_column_index(rev_h, picked)
+                    except KeyError as e:
+                        raise RuntimeError(
+                            "BOM 「좌표명」열이 지정한 검토 범위(맨 위 행 헤더)에 없습니다.\n"
+                            "검토 영역에 좌표명 열이 포함되도록 다시 선택하거나, 좌표명 콤보를 "
+                            "그 헤더와 맞춘 뒤 다시 「검토 범위 적용」하세요.\n"
+                            f"(검토 헤더: {list(rev_h)} / 콤보: {picked!r})"
+                        ) from e
+                    self.combo_bom_ref.set(rev_h[j])
+                    bom_coord_excel_col_1based = c1 + j
+                merged = apply_review_selection_to_snapshot(
                     snap_path,
-                    sheet_name=dest_sheet,
-                    max_data_rows=None,
+                    role=role,
+                    dest_sheet_name=dest,
+                    source_meta=src_meta,
+                    parsed=parsed,
+                    bom_coord_excel_col_1based=bom_coord_excel_col_1based,
                 )
-            except Exception as e:  # noqa: BLE001
-                messagebox.showerror("복사본 읽기", str(e), parent=self)
-                on_cancel()
+                return merged, dest
+
+            def on_review_ok(
+                full_headers: list[str],
+                full_data: list[list[Any]],
+                review_headers: list[str],
+                _review_data: list[list[Any]],
+                meta: SelectionSourceMeta,
+                ur_r: int,
+                ur_c: int,
+                r1: int,
+                c1: int,
+                r2: int,
+                c2: int,
+                dest_sheet: str,
+            ) -> None:
+                bounds = (ur_r, ur_c, r1, c1, r2, c2)
+                try:
+                    snap_path = self._snapshot_workbook
+                    if snap_path is None:
+                        raise RuntimeError("검토용 통합문서 경로가 없습니다.")
+                    h2, r2rows = load_header_and_rows_by_sheet_name(
+                        snap_path,
+                        sheet_name=dest_sheet,
+                        max_data_rows=None,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    messagebox.showerror("복사본 읽기", str(e), parent=self)
+                    on_review_cancel()
+                    return
+                self._apply_excel_table(
+                    role,
+                    path,
+                    h2,
+                    r2rows,
+                    review_headers=review_headers,
+                    excel_bounds=bounds,
+                )
+                self._fill_other_combos_after_excel(role)
+                self._log(
+                    "Excel: 1단계 시트 복사 후 2단계에서 검토 범위를 지정했습니다(서식 유지).\n"
+                    f"· 원본: {path.name} ({role})\n"
+                    f"· 결과 파일: {self._snapshot_workbook}\n"
+                    f"· 복사 시트: {dest_sheet}\n"
+                    f"· 원본 시트명: {meta.source_sheet}\n"
+                    f"· 결과 시트 UsedRange: {meta.sheet_used_range_address}\n"
+                    f"· 결과 시트 검토 범위: {meta.review_range_address}\n"
+                    "검토 범위의 첫 행을 헤더로 썼습니다. BOM·원본 열 매핑을 확인하세요.\n"
+                )
+
+            def on_review_cancel() -> None:
+                self._refresh_headers()
+
+            snap = self._snapshot_workbook
+            if snap is None:
+                messagebox.showerror("확인", "검토용 통합문서 경로가 없습니다.", parent=self)
                 return
-            self._apply_excel_table(
-                role,
-                path,
-                h2,
-                r2,
-                review_headers=review_headers,
-                excel_bounds=bounds,
-            )
-            self._fill_other_combos_after_excel(role)
-            self._log(
-                "Excel에서 시트 전체를 복사해 검토용 통합문서에 반영했습니다(서식 유지).\n"
-                f"· 원본: {path.name} ({role})\n"
-                f"· 결과 파일: {self._snapshot_workbook}\n"
-                f"· 복사 시트: {dest_sheet}\n"
-                f"· 원본 시트명: {meta.source_sheet}\n"
-                f"· 결과 시트 UsedRange: {meta.sheet_used_range_address}\n"
-                f"· 결과 시트 검토 범위: {meta.review_range_address}\n"
-                "검토 범위의 첫 행을 헤더로 썼습니다. BOM·원본 열 매핑을 확인하세요.\n"
+            ExcelReviewRangeDialog(
+                self,
+                snap,
+                dest,
+                persist_com=persist_review,
+                on_ok=on_review_ok,
+                on_cancel=on_review_cancel,
             )
 
-        def on_cancel() -> None:
+        def on_sheet_cancel() -> None:
             self._refresh_headers()
 
-        ExcelRangeDialog(
+        ExcelSheetCopyDialog(
             self,
             path,
-            persist_com=persist_com,
-            on_ok=on_ok,
-            on_cancel=on_cancel,
+            persist_com=persist_sheet_only,
+            on_sheet_copied=on_sheet_copied,
+            on_cancel=on_sheet_cancel,
         )
 
     def _apply_excel_table(
@@ -799,9 +858,6 @@ class ReviewApp(tk.Tk):
                 "BOM 수량 열을 선택하세요. 「헤더 다시 읽기」를 눌러 주세요.",
             )
             return
-        delim = self.var_delim.get()
-        if delim == "":
-            delim = ", "
 
         qf: list = []
         bom_mat_vals: list[Any] = []
@@ -851,7 +907,7 @@ class ReviewApp(tk.Tk):
                 messagebox.showerror(
                     "BOM 열 오류",
                     f"{e}\n\n콤보에 보이는 이름과 실제 시트 헤더가 어긋났을 수 있습니다. "
-                    "「헤더 다시 읽기」 후 자재명·좌표명·수량을 다시 선택해 보세요.",
+                    "「헤더 다시 읽기」 후 좌표명·자재명·수량을 다시 선택해 보세요.",
                 )
                 return
             bom_cells = values_for_column(bh, br, bom_col)
@@ -923,7 +979,7 @@ class ReviewApp(tk.Tk):
 
         bom_refs_flat: list[str] = []
         for v in bom_cells:
-            bom_refs_flat.extend(split_designators(v, delimiter=delim))
+            bom_refs_flat.extend(tokenize_designators_loose(v))
 
         src_refs: list[str] = []
         for v in src_cells:
@@ -946,9 +1002,7 @@ class ReviewApp(tk.Tk):
 
         try:
             qty_vals = values_for_column(bh, br, qty_choice)
-            qf = bom_quantity_mismatch_findings(
-                bom_cells, qty_vals, delimiter=delim
-            )
+            qf = bom_quantity_mismatch_findings(bom_cells, qty_vals)
         except KeyError as e:
             messagebox.showerror("BOM 수량 열 오류", str(e))
             return

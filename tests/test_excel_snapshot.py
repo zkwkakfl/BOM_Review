@@ -4,7 +4,9 @@ from pathlib import Path
 
 from bom_review.excel_com import SelectionSourceMeta
 from bom_review.excel_snapshot import (
+    BOM_REVIEW_COPY_SHEET,
     RANGE_SET_SHEET,
+    apply_review_selection_to_snapshot,
     destination_sheet_name_for_role,
     finalize_snapshot_openpyxl,
     new_snapshot_workbook_path,
@@ -13,8 +15,50 @@ from bom_review.excel_snapshot import (
 from bom_review.table_io import load_header_and_rows_by_sheet_name
 
 
+def test_apply_review_keeps_source_file_from_phase1_meta(tmp_path: Path) -> None:
+    """2단계 apply_review는 원본파일·원본시트를 1단계 메타에서 유지한다."""
+    from openpyxl import Workbook, load_workbook
+
+    p = tmp_path / "twostep.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = BOM_REVIEW_COPY_SHEET
+    ws.append(["Part", "Ref"])
+    ws.append(["A", "R1 R2"])
+    ws.append(["B", "R3"])
+    wb.save(p)
+    wb.close()
+
+    source_meta = SelectionSourceMeta("원본.xlsx", "BOM시트", "$A$1:$B$3", "$A$1:$B$3")
+    dummy = SelectionSourceMeta("?", "?", "$A$1:$B$2", "$A$1:$B$2")
+    full_h = ["Part", "Ref"]
+    full_d = [["A", "R1 R2"], ["B", "R3"]]
+    rev_h = list(full_h)
+    rev_d = [["A", "R1 R2"]]
+    parsed = (full_h, full_d, rev_h, rev_d, dummy, 1, 1, 1, 1, 2, 2)
+
+    merged = apply_review_selection_to_snapshot(
+        p,
+        role="BOM",
+        dest_sheet_name=BOM_REVIEW_COPY_SHEET,
+        source_meta=source_meta,
+        parsed=parsed,
+        bom_coord_excel_col_1based=2,
+    )
+    assert merged.source_file == "원본.xlsx"
+    assert merged.source_sheet == "BOM시트"
+    assert merged.review_range_address == "$A$1:$B$2"
+
+    wb2 = load_workbook(p)
+    try:
+        w = wb2[BOM_REVIEW_COPY_SHEET]
+        assert w.cell(row=2, column=2).value == "R1, R2"
+    finally:
+        wb2.close()
+
+
 def test_destination_sheet_name_for_role() -> None:
-    assert destination_sheet_name_for_role("BOM") == "BOM_검토복사"
+    assert destination_sheet_name_for_role("BOM") == BOM_REVIEW_COPY_SHEET
     assert destination_sheet_name_for_role("원본") == "원본_검토복사"
 
 
@@ -84,12 +128,117 @@ def test_bom_snapshot_normalizes_coord_column_to_comma_space(tmp_path: Path) -> 
     assert rows[0][pi] == "X"
 
 
+def test_finalize_skips_header_row_in_coord_column(tmp_path: Path) -> None:
+    """헤더 셀은 공백이 구분자로 오해되지 않게 좌표 정규화에서 제외한다."""
+    from openpyxl import Workbook, load_workbook
+
+    p = tmp_path / "hdr.xlsx"
+    sheet = BOM_REVIEW_COPY_SHEET
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet
+    ws.append(["자품목 번호", "위치정보"])
+    ws.append(["P1", "R1 R2"])
+    wb.save(p)
+    wb.close()
+
+    meta = SelectionSourceMeta("b.xlsx", "S", "$A$1:$B$2", "$A$1:$B$2")
+    finalize_snapshot_openpyxl(
+        p,
+        role="BOM",
+        dest_sheet_name=sheet,
+        meta=meta,
+        bom_coord_excel_col_1based=2,
+        bom_norm_row_start=1,
+        bom_norm_row_end=2,
+        bom_first_data_row_1based=2,
+    )
+
+    wb2 = load_workbook(p)
+    try:
+        w = wb2[sheet]
+        assert w.cell(row=1, column=1).value == "자품목 번호"
+        assert w.cell(row=1, column=2).value == "위치정보"
+        assert w.cell(row=2, column=2).value == "R1, R2"
+    finally:
+        wb2.close()
+
+
+def test_finalize_skips_rows_until_after_review_header_row(tmp_path: Path) -> None:
+    """UsedRange가 검토 헤더보다 위 행(제목 등)을 포함할 때, 헤더 행 공백이 깨지지 않는다."""
+    from openpyxl import Workbook, load_workbook
+
+    p = tmp_path / "title_hdr.xlsx"
+    sheet = BOM_REVIEW_COPY_SHEET
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet
+    ws.append(["BOM 목록", None])
+    ws.append(["자품목 번호", "위치정보"])
+    ws.append(["P1", "R1 R2"])
+    wb.save(p)
+    wb.close()
+
+    meta = SelectionSourceMeta("b.xlsx", "S", "$A$1:$B$3", "$A$2:$B$3")
+    finalize_snapshot_openpyxl(
+        p,
+        role="BOM",
+        dest_sheet_name=sheet,
+        meta=meta,
+        bom_coord_excel_col_1based=2,
+        bom_norm_row_start=1,
+        bom_norm_row_end=3,
+        bom_first_data_row_1based=3,
+    )
+
+    wb2 = load_workbook(p)
+    try:
+        w = wb2[sheet]
+        assert w.cell(row=2, column=1).value == "자품목 번호"
+        assert w.cell(row=2, column=2).value == "위치정보"
+        assert w.cell(row=3, column=2).value == "R1, R2"
+    finally:
+        wb2.close()
+
+
+def test_finalize_only_normalizes_bom_review_copy_sheet_name(tmp_path: Path) -> None:
+    """역할이 BOM이어도 시트명이 BOM 복사본이 아니면 좌표 열을 바꾸지 않는다."""
+    from openpyxl import Workbook, load_workbook
+
+    p = tmp_path / "src_only.xlsx"
+    wrong_sheet = "원본_검토복사"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = wrong_sheet
+    ws.append(["Ref"])
+    ws.append(["R1 R2"])
+    wb.save(p)
+    wb.close()
+
+    meta = SelectionSourceMeta("s.xlsx", "S", "$A$1:$A$2", "$A$1:$A$2")
+    finalize_snapshot_openpyxl(
+        p,
+        role="BOM",
+        dest_sheet_name=wrong_sheet,
+        meta=meta,
+        bom_coord_excel_col_1based=1,
+        bom_norm_row_start=1,
+        bom_norm_row_end=2,
+    )
+
+    wb2 = load_workbook(p)
+    try:
+        assert wb2[wrong_sheet].cell(row=2, column=1).value == "R1 R2"
+    finally:
+        wb2.close()
+
+
 def test_finalize_snapshot_skips_merged_cells_in_bom_coord_column(tmp_path: Path) -> None:
     """병합된 좌표 열에서 MergedCell에 value 대입 시 read-only 오류가 나지 않아야 한다."""
     from openpyxl import Workbook, load_workbook
 
     p = tmp_path / "merged.xlsx"
-    sheet = "BOM_검토복사"
+    sheet = BOM_REVIEW_COPY_SHEET
     wb = Workbook()
     ws = wb.active
     ws.title = sheet
@@ -110,6 +259,7 @@ def test_finalize_snapshot_skips_merged_cells_in_bom_coord_column(tmp_path: Path
         bom_coord_excel_col_1based=2,
         bom_norm_row_start=1,
         bom_norm_row_end=4,
+        bom_first_data_row_1based=2,
     )
 
     wb2 = load_workbook(p)
