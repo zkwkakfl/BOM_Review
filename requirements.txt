@@ -1,3 +1,4 @@
 # BOM 검토 도구 — 매칭·검증·파일 읽기
 openpyxl>=3.1.0
+pywin32>=306; sys_platform == "win32"
 pytest>=8.0.0

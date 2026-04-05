@@ -5,9 +5,11 @@ from __future__ import annotations
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from bom_review._version import __version__
 from bom_review.bom_parse import split_designators
+from bom_review.excel_com import is_excel_path
 from bom_review.bom_qty import bom_quantity_mismatch_findings
 from bom_review.matching import (
     bom_vs_source_findings,
@@ -44,6 +46,11 @@ class ReviewApp(tk.Tk):
 
         self._bom_headers: list[str] = []
         self._src_headers: list[str] = []
+        # Excel에서 잡은 범위(첫 행=헤더). None이면 파일 전체(첫 시트) 읽기
+        self._bom_table_override: tuple[list[str], list[list[Any]]] | None = None
+        self._bom_override_key: str | None = None
+        self._src_table_override: tuple[list[str], list[list[Any]]] | None = None
+        self._src_override_key: str | None = None
 
         self._build_menubar()
 
@@ -73,7 +80,11 @@ class ReviewApp(tk.Tk):
         mid = ttk.Frame(self, padding=(8, 0))
         mid.pack(fill=tk.BOTH, expand=True)
 
-        left = ttk.LabelFrame(mid, text="파일 목록 (더블클릭: 역할 지정)", padding=6)
+        left = ttk.LabelFrame(
+            mid,
+            text="파일 목록 (더블클릭: 역할 → Excel이면 범위 지정 여부)",
+            padding=6,
+        )
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.list_files = tk.Listbox(left, height=18, exportselection=False)
@@ -128,7 +139,7 @@ class ReviewApp(tk.Tk):
 
         self._status = ttk.Label(
             self,
-            text=f"정식 v{__version__}  |  Excel은 첫 시트만  |  CSV: UTF-8( BOM )·CP949 자동 시도",
+            text=f"정식 v{__version__}  |  Excel: 역할 지정 시 COM으로 범위 선택 가능  |  CSV는 파일·열 선택",
             anchor=tk.W,
             relief=tk.SUNKEN,
             padding=(6, 2),
@@ -157,9 +168,11 @@ class ReviewApp(tk.Tk):
         return (
             "【정식 사용 순서】\n\n"
             "1. 「폴더 선택」 또는 메뉴 파일 → 작업 폴더 선택\n"
-            "2. BOM 파일은 역할 필수. 원본(PCB) 좌표는 없으면 생략 가능 — 메탈 TOP/BOT 도 선택.\n"
-            "3. 「헤더 다시 읽기」 후 BOM 좌표명 열 선택 (수량·원본 열은 선택)\n"
-            "4. 「검토 실행」 — 원본이 없으면 BOM 수량·중복만 검토합니다.\n\n"
+            "2. BOM 파일은 역할 필수. 원본·메탈은 선택.\n"
+            "3. Excel(xlsx 등)에서 BOM/원본 역할을 고르면 Excel이 열려 드래그·Shift+방향키로 범위를 잡을 수 있습니다. "
+            "「아니오」면 첫 시트 전체 + 콤보.\n"
+            "4. 「헤더 다시 읽기」는 파일 기준으로 다시 읽으며, Excel로 잡은 범위는 해제됩니다.\n"
+            "5. 「검토 실행」 — 원본이 없으면 BOM 수량·중복만 검토합니다.\n\n"
             "※ 원본이 있을 때: 원본이 기준이며, BOM에만 있는 Reference는 오류, 원본에만 있는 항목은 참고(오류 아님).\n"
         )
 
@@ -188,7 +201,7 @@ class ReviewApp(tk.Tk):
         for p in self._paths:
             self.list_files.insert(tk.END, p.name)
         self._update_role_labels()
-        self._clear_combos()
+        self._clear_overrides_and_combos()
         self._log(f"폴더: {self._folder}\n파일 {len(self._paths)}개\n")
 
     def _selected_path(self) -> Path | None:
@@ -231,6 +244,17 @@ class ReviewApp(tk.Tk):
                 self._role_by_key[key] = v
             dlg.destroy()
             self._update_role_labels()
+            if v in (ROLE_BOM, ROLE_SOURCE) and is_excel_path(p):
+                ask = messagebox.askyesno(
+                    "Excel 범위 지정",
+                    f"{p.name}\n\n"
+                    "Excel을 열고 마우스 드래그·Shift+방향키로 범위를 선택한 뒤 적용할까요?\n\n"
+                    "「아니오」는 첫 시트 전체를 읽어 콤보박스로 열 고르기(기존 방식)입니다.",
+                    parent=self,
+                )
+                if ask:
+                    self._start_excel_range_pick(p, v)
+                    return
             self._refresh_headers()
 
         bf = ttk.Frame(dlg, padding=8)
@@ -249,6 +273,13 @@ class ReviewApp(tk.Tk):
         self.lbl_bom.config(text=f"BOM: {b.name if b else '—'}")
         self.lbl_src.config(text=f"원본좌표: {s.name if s else '—'}")
 
+    def _clear_overrides_and_combos(self) -> None:
+        self._bom_table_override = None
+        self._bom_override_key = None
+        self._src_table_override = None
+        self._src_override_key = None
+        self._clear_combos()
+
     def _clear_combos(self) -> None:
         self._bom_headers = []
         self._src_headers = []
@@ -259,7 +290,97 @@ class ReviewApp(tk.Tk):
         self.combo_src_ref.configure(values=[])
         self.combo_src_ref.configure(state="disabled")
 
+    def _start_excel_range_pick(self, path: Path, role: str) -> None:
+        from bom_review.excel_range_dialog import ExcelRangeDialog
+
+        def on_ok(headers: list[str], data: list[list[Any]]) -> None:
+            self._apply_excel_table(role, path, headers, data)
+            self._fill_other_combos_after_excel(role)
+
+        def on_cancel() -> None:
+            self._refresh_headers()
+
+        ExcelRangeDialog(self, path, on_ok=on_ok, on_cancel=on_cancel)
+
+    def _apply_excel_table(
+        self,
+        role: str,
+        path: Path,
+        headers: list[str],
+        data_rows: list[list[Any]],
+    ) -> None:
+        key = self._path_key(path)
+        if role == ROLE_BOM:
+            self._bom_table_override = (headers, data_rows)
+            self._bom_override_key = key
+            self._bom_headers = headers
+            self.combo_bom_ref.configure(values=headers, state="readonly")
+            self.combo_bom_qty.configure(values=["(없음)"] + headers)
+            self.combo_bom_qty.set("(없음)")
+            if headers:
+                self.combo_bom_ref.set(headers[0])
+        elif role == ROLE_SOURCE:
+            self._src_table_override = (headers, data_rows)
+            self._src_override_key = key
+            self._src_headers = headers
+            self.combo_src_ref.configure(values=headers, state="readonly")
+            if headers:
+                self.combo_src_ref.set(headers[0])
+        self._log(
+            f"Excel 범위 적용: {path.name} ({role})\n"
+            "첫 행을 헤더로 썼습니다. 좌표명·수량 열을 확인하세요.\n"
+        )
+
+    def _fill_other_combos_after_excel(self, edited_role: str) -> None:
+        if edited_role == ROLE_BOM:
+            self._load_src_combos_from_file_if_needed()
+        elif edited_role == ROLE_SOURCE:
+            self._load_bom_combos_from_file_if_needed()
+
+    def _load_src_combos_from_file_if_needed(self) -> None:
+        src = self._path_for_role(ROLE_SOURCE)
+        if src is None:
+            self.combo_src_ref.set("")
+            self.combo_src_ref.configure(values=[], state="disabled")
+            self._src_headers = []
+            return
+        sk = self._path_key(src)
+        if self._src_override_key == sk and self._src_table_override is not None:
+            return
+        try:
+            h, _ = load_header_and_rows(src, sheet_index=0, max_data_rows=0)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("원본 헤더", str(e))
+            return
+        self._src_headers = h
+        self.combo_src_ref.configure(values=h, state="readonly")
+        if h:
+            self.combo_src_ref.set(h[0])
+
+    def _load_bom_combos_from_file_if_needed(self) -> None:
+        bom = self._path_for_role(ROLE_BOM)
+        if bom is None:
+            return
+        bk = self._path_key(bom)
+        if self._bom_override_key == bk and self._bom_table_override is not None:
+            return
+        try:
+            h, _ = load_header_and_rows(bom, sheet_index=0, max_data_rows=0)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("BOM 헤더", str(e))
+            return
+        self._bom_headers = h
+        self.combo_bom_ref.configure(values=h, state="readonly")
+        self.combo_bom_qty.configure(values=["(없음)"] + h)
+        self.combo_bom_qty.set("(없음)")
+        if h:
+            self.combo_bom_ref.set(h[0])
+
     def _refresh_headers(self) -> None:
+        self._bom_table_override = None
+        self._bom_override_key = None
+        self._src_table_override = None
+        self._src_override_key = None
         bom = self._path_for_role(ROLE_BOM)
         src = self._path_for_role(ROLE_SOURCE)
         if bom is None:
@@ -328,13 +449,25 @@ class ReviewApp(tk.Tk):
 
         qf: list = []
         try:
-            bh, br = load_header_and_rows(bom_p, sheet_index=0, max_data_rows=None)
+            if (
+                self._bom_table_override is not None
+                and self._bom_override_key == self._path_key(bom_p)
+            ):
+                bh, br = self._bom_table_override
+            else:
+                bh, br = load_header_and_rows(bom_p, sheet_index=0, max_data_rows=None)
             bom_cells = values_for_column(bh, br, bom_col)
             sh: list[str] = []
-            sr: list[list[object]] = []
-            src_cells: list = []
+            sr: list[list[Any]] = []
+            src_cells: list[Any] = []
             if src_p is not None:
-                sh, sr = load_header_and_rows(src_p, sheet_index=0, max_data_rows=None)
+                if (
+                    self._src_table_override is not None
+                    and self._src_override_key == self._path_key(src_p)
+                ):
+                    sh, sr = self._src_table_override
+                else:
+                    sh, sr = load_header_and_rows(src_p, sheet_index=0, max_data_rows=None)
                 src_cells = values_for_column(sh, sr, src_col)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("파일 읽기 실패", str(e))
