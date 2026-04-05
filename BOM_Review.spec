@@ -1,5 +1,5 @@
-# PyInstaller 스펙 — Windows 단일 exe
-# 빌드: pyinstaller BOM_Review.spec  (또는 .\build.ps1)
+# PyInstaller — Windows 단일 exe
+# 빌드: build.bat / build_formal.bat 또는 scripts\*.ps1
 
 import sys
 from pathlib import Path

@@ -1,5 +1,5 @@
 @echo off
-rem 공통: 실제 Python 실행 파일 경로를 PY에 설정. 실패 시 errorlevel 1.
+rem 프로젝트 루트에서 call 할 것. PY 에 Python 경로 설정, 실패 시 errorlevel 1.
 set "PY="
 where python >nul 2>&1
 if %errorlevel% equ 0 (
