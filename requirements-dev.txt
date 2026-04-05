@@ -1,2 +1,2 @@
-# PyInstaller (빌드: 루트 build.bat 또는 scripts\build.bat)
+# PyInstaller — 빌드: build.bat  (정식: build.bat formal)
 pyinstaller>=6.0

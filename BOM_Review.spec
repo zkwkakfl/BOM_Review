@@ -1,5 +1,5 @@
 # PyInstaller — Windows 단일 exe
-# 빌드: build.bat / build_formal.bat 또는 scripts\*.ps1
+# 빌드: build.bat  (정식: build.bat formal) 또는 scripts\build.ps1 -Formal
 
 import sys
 from pathlib import Path
